@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Credit Ledger — Loan Risk Assessment</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<div class="page">
+
+  <header class="masthead">
+    <div class="masthead__mark">
+      <svg class="masthead__seal" viewBox="0 0 40 40" aria-hidden="true">
+        <circle cx="20" cy="20" r="18" />
+        <circle cx="20" cy="20" r="13" />
+        <path d="M20 10 L20 30 M10 20 L30 20" />
+      </svg>
+      <div>
+        <h1>Credit Ledger</h1>
+        <p class="masthead__tag">An underwriting desk for consumer loan applications (XGBoost + SHAP)</p>
+      </div>
+    </div>
+    <div class="masthead__status" id="apiStatus">
+      <span class="dot" id="apiDot"></span>
+      <span id="apiStatusText">checking service…</span>
+    </div>
+  </header>
+
+  <form class="ledger" id="riskForm" novalidate>
+
+    <fieldset class="ledger__section">
+      <legend>01 — Applicant</legend>
+
+      <div class="row">
+        <label for="person_age">Age</label>
+        <div class="field">
+          <input type="number" id="person_age" name="person_age" min="18" max="100" step="1" value="30" required />
+          <span class="unit">years</span>
+        </div>
+      </div>
+
+      <div class="row">
+        <label for="person_income">Annual income</label>
+        <div class="field">
+          <span class="unit unit--prefix">$</span>
+          <input type="number" id="person_income" name="person_income" min="1000" step="1000" value="60000" required />
+        </div>
+      </div>
+
+      <div class="row">
+        <label for="person_home_ownership">Home ownership</label>
+        <div class="field">
+          <select id="person_home_ownership" name="person_home_ownership" required>
+            <option value="RENT">Renting</option>
+            <option value="MORTGAGE">Mortgage</option>
+            <option value="OWN">Owns outright</option>
+            <option value="OTHER">Other</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="row">
+        <label for="person_emp_length">Employment length</label>
+        <div class="field">
+          <input type="number" id="person_emp_length" name="person_emp_length" min="0" max="60" step="0.5" value="5" required />
+          <span class="unit">years</span>
+        </div>
+      </div>
+    </fieldset>
+
+    <fieldset class="ledger__section">
+      <legend>02 — Loan request</legend>
+
+      <div class="row">
+        <label for="loan_intent">Purpose</label>
+        <div class="field">
+          <select id="loan_intent" name="loan_intent" required>
+            <option value="PERSONAL">Personal</option>
+            <option value="EDUCATION">Education</option>
+            <option value="MEDICAL">Medical</option>
+            <option value="VENTURE">Venture</option>
+            <option value="HOMEIMPROVEMENT">Home improvement</option>
+            <option value="DEBTCONSOLIDATION">Debt consolidation</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="row">
+        <label for="loan_grade">Loan grade</label>
+        <div class="field">
+          <select id="loan_grade" name="loan_grade" required>
+            <option value="A">Grade A (Prime)</option>
+            <option value="B">Grade B</option>
+            <option value="C">Grade C</option>
+            <option value="D">Grade D</option>
+            <option value="E">Grade E</option>
+            <option value="F">Grade F</option>
+            <option value="G">Grade G</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="row">
+        <label for="loan_amnt">Loan amount</label>
+        <div class="field">
+          <span class="unit unit--prefix">$</span>
+          <input type="number" id="loan_amnt" name="loan_amnt" min="500" step="500" value="10000" required />
+        </div>
+      </div>
+
+      <div class="row">
+        <label for="loan_int_rate">Interest rate</label>
+        <div class="field">
+          <input type="number" id="loan_int_rate" name="loan_int_rate" min="1" max="40" step="0.01" value="7.5" required />
+          <span class="unit">%</span>
+        </div>
+      </div>
+
+      <div class="row">
+        <label for="loan_percent_income">Loan-to-income ratio</label>
+        <div class="field">
+          <input type="number" id="loan_percent_income" name="loan_percent_income" min="0" max="1" step="0.01" value="0.17" required />
+          <span class="unit">ratio</span>
+        </div>
+      </div>
+      <p class="hint" id="percentHint">Auto-calculated: loan amount ÷ annual income ($10,000 ÷ $60,000 = 0.17).</p>
+    </fieldset>
+
+    <fieldset class="ledger__section">
+      <legend>03 — Credit bureau file</legend>
+
+      <div class="row">
+        <label for="cb_person_default_on_file">Prior default on file</label>
+        <div class="field">
+          <select id="cb_person_default_on_file" name="cb_person_default_on_file" required>
+            <option value="N">No (Clean file)</option>
+            <option value="Y">Yes (Historical default)</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="row">
+        <label for="cb_person_cred_hist_length">Credit history length</label>
+        <div class="field">
+          <input type="number" id="cb_person_cred_hist_length" name="cb_person_cred_hist_length" min="0" max="60" step="1" value="6" required />
+          <span class="unit">years</span>
+        </div>
+      </div>
+    </fieldset>
+
+    <div class="submit-row">
+      <button type="submit" id="submitBtn">
+        <span class="btn-label">Assess risk</span>
+        <span class="btn-spinner" aria-hidden="true"></span>
+      </button>
+      <p class="error-note" id="errorNote" role="alert" hidden></p>
+    </div>
+
+  </form>
+
+  <section class="verdict" id="verdict" aria-live="polite" hidden>
+    <div class="verdict__inner">
+
+      <div class="verdict__gauge">
+        <svg viewBox="0 0 200 200" class="gauge">
+          <circle class="gauge__track" cx="100" cy="100" r="86" />
+          <circle class="gauge__fill" id="gaugeFill" cx="100" cy="100" r="86" />
+          <line class="gauge__threshold" id="gaugeThreshold" x1="100" y1="14" x2="100" y2="30" />
+        </svg>
+        <div class="gauge__readout">
+          <span class="gauge__number" id="probNumber">0</span><span class="gauge__percent">%</span>
+          <span class="gauge__caption">default probability</span>
+        </div>
+      </div>
+
+      <div class="verdict__detail">
+        <div class="stamp-wrap">
+          <div class="stamp" id="stampBadge">
+            <span id="stampText">LOW RISK</span>
+          </div>
+        </div>
+
+        <dl class="ledger-facts">
+          <div>
+            <dt>Default probability</dt>
+            <dd id="factProb">—</dd>
+          </div>
+          <div>
+            <dt>Decision threshold</dt>
+            <dd id="factThreshold">69.5%</dd>
+          </div>
+          <div>
+            <dt>Risk tier</dt>
+            <dd id="factResult">—</dd>
+          </div>
+        </dl>
+      </div>
+
+    </div>
+
+    <!-- SHAP Explainability Breakdown -->
+    <div class="shap-section" id="shapSection">
+      <div class="shap-header">
+        <div class="shap-title-wrap">
+          <div class="shap-badge">SHAP EXPLAINABILITY</div>
+          <h3 class="shap-heading">Decision Factor Breakdown</h3>
+          <p class="shap-sub">
+            Impact in log-odds units &bull; Negative values lower default risk, positive values increase risk.
+          </p>
+        </div>
+        <div class="shap-summary-chips">
+          <span class="chip chip--down"><span class="chip-indicator"></span><span id="riskDownCount">0</span> factors reducing risk</span>
+          <span class="chip chip--up"><span class="chip-indicator"></span><span id="riskUpCount">0</span> factors increasing risk</span>
+        </div>
+      </div>
+
+      <div class="shap-legend">
+        <div class="legend-item"><span class="legend-swatch swatch--reduce"></span> Reduces default risk (favorable)</div>
+        <div class="legend-item"><span class="legend-swatch swatch--increase"></span> Increases default risk (adverse)</div>
+      </div>
+
+      <div class="shap-list" id="shapList">
+        <!-- Injected dynamically by script.js -->
+      </div>
+
+      <div class="shap-notes">
+        <p>&bull; <strong>Technical Calibration Note:</strong> SHAP values explain drivers of the underlying model in log-odds space. The final default probability is produced via probability calibration (CalibratedClassifierCV).</p>
+        <p>&bull; <strong>Fair Lending / ECOA Note:</strong> Age is a model input and would need compliance review before real-world use; under federal fair lending rules, it should not be cited as an adverse-action reason.</p>
+      </div>
+    </div>
+
+  </section>
+
+  <footer class="foot">
+    <p>Figures are model estimates, not a lending decision. Recorded for reference only.</p>
+  </footer>
+
+</div>
+
+<script src="script.js"></script>
+</body>
+</html>
