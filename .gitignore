@@ -2,3 +2,8 @@ __pycache__/
 *.pyc
 .mplcache/
 *.log
+.venv/
+.pytest_cache/
+infra/cdk.out/
+artifacts/mlflow_run.json
+infra/cdk-outputs.json

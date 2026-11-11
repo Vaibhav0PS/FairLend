@@ -37,10 +37,15 @@
     G: 21.0,
   };
 
+  // Suggest a typical rate for the grade, but never overwrite a rate the user typed.
+  let rateEditedByUser = false;
   if (gradeInput && rateInput) {
+    rateInput.addEventListener("input", () => {
+      rateEditedByUser = true;
+    });
     gradeInput.addEventListener("change", () => {
       const benchmarkRate = GRADE_TYPICAL_RATES[gradeInput.value];
-      if (benchmarkRate !== undefined) {
+      if (benchmarkRate !== undefined && !rateEditedByUser) {
         rateInput.value = benchmarkRate.toFixed(1);
       }
     });
@@ -104,6 +109,23 @@
   function clearError() {
     errorNote.hidden = true;
     errorNote.textContent = "";
+  }
+
+  function fieldLabel(name) {
+    const label = document.querySelector(`label[for="${name}"]`);
+    return label ? label.textContent.trim() : name;
+  }
+
+  // Turn FastAPI 422 details into readable sentences.
+  function formatValidationErrors(detail) {
+    if (!Array.isArray(detail)) return String(detail);
+    return detail
+      .map((d) => {
+        const field = Array.isArray(d.loc) ? d.loc[d.loc.length - 1] : "";
+        const msg = String(d.msg || "").replace(/^Value error, /, "");
+        return field && field !== "body" ? `${fieldLabel(field)}: ${msg}` : msg;
+      })
+      .join(" ");
   }
 
   function animateNumber(el, from, to, duration) {
@@ -235,6 +257,10 @@
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     clearError();
+    if (!form.checkValidity()) {
+      form.reportValidity();
+      return;
+    }
     setLoading(true);
 
     const payload = {
@@ -246,28 +272,38 @@
       loan_grade: document.getElementById("loan_grade").value,
       loan_amnt: parseFloat(amountInput.value),
       loan_int_rate: parseFloat(document.getElementById("loan_int_rate").value),
-      loan_percent_income: parseFloat(percentInput.value),
       cb_person_default_on_file: document.getElementById("cb_person_default_on_file").value,
       cb_person_cred_hist_length: parseInt(document.getElementById("cb_person_cred_hist_length").value, 10),
     };
 
+    let res;
     try {
-      const res = await fetch("/predict", {
+      res = await fetch("/predict", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-
-      if (!res.ok) {
-        const body = await res.json().catch(() => null);
-        const detail = body && body.detail ? JSON.stringify(body.detail) : `HTTP ${res.status}`;
-        throw new Error(detail);
-      }
-
-      const data = await res.json();
-      renderVerdict(data);
     } catch (err) {
-      showError(`Could not reach the ledger. ${err.message || "Check the service is running."}`);
+      showError("Could not reach the ledger. Check the service is running.");
+      setLoading(false);
+      return;
+    }
+
+    try {
+      if (res.status === 422) {
+        const body = await res.json().catch(() => null);
+        showError(`Please check the application. ${formatValidationErrors(body && body.detail)}`);
+        return;
+      }
+      if (!res.ok) {
+        showError(`The ledger returned an error (HTTP ${res.status}). Try again shortly.`);
+        return;
+      }
+      const data = await res.json();
+      if (typeof data.loan_percent_income === "number") {
+        percentInput.value = data.loan_percent_income.toFixed(2);
+      }
+      renderVerdict(data);
     } finally {
       setLoading(false);
     }

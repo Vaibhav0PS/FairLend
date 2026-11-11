@@ -1,0 +1,10 @@
+-r requirements-train.txt
+pytest==9.2.0
+httpx==0.28.1
+# Infrastructure (AWS CDK, Python)
+aws-cdk-lib==2.276.0
+constructs==10.8.1
+# Notebook / exploration only
+shap==0.51.0
+seaborn
+jupyter

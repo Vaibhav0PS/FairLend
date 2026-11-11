@@ -1,180 +1,169 @@
+import json
+import logging
 import os
-import sys
+import time
+from pathlib import Path
+from typing import Literal
 
-# Ensure matplotlib uses the project local cache to prevent font-cache rebuilds and permission errors
-os.environ["MPLCONFIGDIR"] = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".mplcache")
-
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-import joblib
-import numpy as np
 import pandas as pd
-from pydantic import BaseModel
-import shap
+from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-# Load model, threshold, and SHAP explainer at startup
-ml_model = {}
-ml_model['model'] = joblib.load('credit_risk_model.pkl')
-ml_model['threshold'] = float(joblib.load('best_threshold.pkl'))
-
-pipeline = ml_model['model'].calibrated_classifiers_[0].estimator
-ml_model['preprocessor'] = pipeline.named_steps['preprocessor']
-ml_model['classifier'] = pipeline.named_steps['classifier']
-ml_model['explainer'] = shap.TreeExplainer(ml_model['classifier'])
-
-base_val = ml_model['explainer'].expected_value
-if isinstance(base_val, (list, tuple, np.ndarray)):
-    base_val = base_val[1] if len(base_val) > 1 else base_val[0]
-ml_model['base_value'] = float(base_val)
-ml_model['feature_names'] = ml_model['preprocessor'].get_feature_names_out()
-
-app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+from credit_risk.config import (
+    DEFAULT_FLAGS,
+    HOME_OWNERSHIP,
+    LOAN_GRADES,
+    LOAN_INTENTS,
+    MAX_AGE,
+    MAX_EMP_LENGTH,
+    MIN_AGE,
 )
+from credit_risk.model import CreditRiskModel
+
+logging.basicConfig(level=logging.INFO, format="%(message)s")
+logger = logging.getLogger("credit-risk")
+
+BASE_DIR = Path(__file__).resolve().parent
+MODEL_DIR = Path(os.environ.get("MODEL_DIR", BASE_DIR / "artifacts"))
+model = CreditRiskModel.load(MODEL_DIR)
+
+app = FastAPI(title="Credit Ledger", version=model.meta.get("model_version", "unknown"))
 
 
-@app.get('/health')
+class LoanApplication(BaseModel):
+    # loan_percent_income is computed on the server; extra fields such as a
+    # client-sent ratio are ignored.
+    model_config = ConfigDict(extra="ignore")
+
+    person_age: int = Field(ge=MIN_AGE, le=MAX_AGE)
+    person_income: float = Field(gt=0, le=10_000_000)
+    person_home_ownership: Literal[HOME_OWNERSHIP]
+    person_emp_length: float = Field(ge=0, le=MAX_EMP_LENGTH)
+    loan_intent: Literal[LOAN_INTENTS]
+    loan_grade: Literal[LOAN_GRADES]
+    loan_amnt: float = Field(gt=0, le=1_000_000)
+    loan_int_rate: float = Field(gt=0, le=40)
+    cb_person_default_on_file: Literal[DEFAULT_FLAGS]
+    cb_person_cred_hist_length: int = Field(ge=0, le=MAX_AGE)
+
+    @model_validator(mode="after")
+    def check_consistency(self) -> "LoanApplication":
+        if self.person_emp_length > self.person_age:
+            raise ValueError("person_emp_length cannot exceed person_age")
+        if self.cb_person_cred_hist_length > self.person_age:
+            raise ValueError("cb_person_cred_hist_length cannot exceed person_age")
+        return self
+
+    def to_features(self) -> dict:
+        features = self.model_dump()
+        # Same 2-decimal rounding as the training data.
+        features["loan_percent_income"] = round(self.loan_amnt / self.person_income, 2)
+        return features
+
+
+HOME_LABELS = {"RENT": "Renting", "MORTGAGE": "Mortgage", "OWN": "Owns Outright", "OTHER": "Other"}
+INTENT_LABELS = {
+    "PERSONAL": "Personal",
+    "EDUCATION": "Education",
+    "MEDICAL": "Medical",
+    "VENTURE": "Venture",
+    "HOMEIMPROVEMENT": "Home Improvement",
+    "DEBTCONSOLIDATION": "Debt Consolidation",
+}
+
+
+def format_feature(col: str, f: dict) -> tuple[str, str]:
+    """Human-readable label and applicant value for an original input column."""
+    formatters = {
+        "person_income": lambda: ("Annual Income", f"${f['person_income']:,.0f}"),
+        "loan_percent_income": lambda: (
+            "Loan-to-income ratio",
+            f"{f['loan_percent_income']:.2f} ({f['loan_percent_income'] * 100:.0f}%)",
+        ),
+        "loan_int_rate": lambda: ("Interest Rate", f"{f['loan_int_rate']:.2f}%"),
+        "loan_amnt": lambda: ("Loan Amount", f"${f['loan_amnt']:,.0f}"),
+        "person_emp_length": lambda: ("Employment Length", f"{f['person_emp_length']:.1f} yrs"),
+        "person_age": lambda: ("Applicant Age", f"{f['person_age']} yrs"),
+        "cb_person_cred_hist_length": lambda: ("Credit History Length", f"{f['cb_person_cred_hist_length']} yrs"),
+        "loan_grade": lambda: ("Loan Grade", f"Grade {f['loan_grade']}"),
+        "person_home_ownership": lambda: ("Home Ownership", HOME_LABELS[f["person_home_ownership"]]),
+        "loan_intent": lambda: ("Loan Purpose", INTENT_LABELS[f["loan_intent"]]),
+        "cb_person_default_on_file": lambda: (
+            "Prior Default Record",
+            "Yes (Prior Default)" if f["cb_person_default_on_file"] == "Y" else "No Prior Defaults",
+        ),
+    }
+    return formatters[col]() if col in formatters else (col, "")
+
+
+@app.get("/health")
 def health():
-    """Real healthcheck verifying service and model readiness."""
-    is_ready = bool(ml_model.get('model') and ml_model.get('explainer'))
     return {
-        "status": "ready" if is_ready else "degraded",
+        "status": "ready",
         "service": "credit-risk-ledger",
-        "model_loaded": bool(ml_model.get('model')),
-        "explainer_loaded": bool(ml_model.get('explainer')),
-        "threshold": ml_model.get("threshold", None)
+        "model_loaded": True,
+        "explainer_loaded": True,
+        "model_version": model.meta.get("model_version"),
+        "threshold": model.threshold,
+        "medium_threshold": model.medium_threshold,
     }
 
 
-def format_feature(feat_name: str, input_dict: dict) -> tuple[str, str]:
-    """Map encoded feature names to human-readable names and applicant values."""
-    if feat_name == 'num__person_income':
-        return 'Annual Income', f"${input_dict['person_income']:,.0f}"
-    elif feat_name == 'num__loan_percent_income':
-        pct = input_dict['loan_percent_income'] * 100
-        return 'Loan-to-income ratio', f"{input_dict['loan_percent_income']:.2f} ({pct:.0f}%)"
-    elif feat_name == 'num__loan_int_rate':
-        return 'Interest Rate', f"{input_dict['loan_int_rate']:.2f}%"
-    elif feat_name == 'num__loan_amnt':
-        return 'Loan Amount', f"${input_dict['loan_amnt']:,.0f}"
-    elif feat_name == 'num__person_emp_length':
-        return 'Employment Length', f"{input_dict['person_emp_length']:.1f} yrs"
-    elif feat_name == 'num__person_age':
-        return 'Applicant Age', f"{input_dict['person_age']} yrs"
-    elif feat_name == 'num__cb_person_cred_hist_length':
-        return 'Credit History Length', f"{input_dict['cb_person_cred_hist_length']} yrs"
-    elif feat_name.startswith('cat__loan_grade_'):
-        grade = feat_name.replace('cat__loan_grade_', '')
-        return 'Loan Grade', f"Grade {grade}"
-    elif feat_name.startswith('cat__person_home_ownership_'):
-        home = feat_name.replace('cat__person_home_ownership_', '')
-        home_label = {'RENT': 'Renting', 'MORTGAGE': 'Mortgage', 'OWN': 'Owns Outright', 'OTHER': 'Other'}.get(home, home)
-        return 'Home Ownership', home_label
-    elif feat_name.startswith('cat__loan_intent_'):
-        intent = feat_name.replace('cat__loan_intent_', '')
-        intent_label = {
-            'PERSONAL': 'Personal',
-            'EDUCATION': 'Education',
-            'MEDICAL': 'Medical',
-            'VENTURE': 'Venture',
-            'HOMEIMPROVEMENT': 'Home Improvement',
-            'DEBTCONSOLIDATION': 'Debt Consolidation'
-        }.get(intent, intent)
-        return 'Loan Purpose', intent_label
-    elif feat_name.startswith('cat__cb_person_default_on_file_'):
-        default = feat_name.replace('cat__cb_person_default_on_file_', '')
-        return 'Prior Default Record', 'Yes (Prior Default)' if default == 'Y' else 'No Prior Defaults'
-    return feat_name, ''
-
-
-# Pydantic input schema
-class LoanApplication(BaseModel):
-    person_age: int
-    person_income: float
-    person_home_ownership: str
-    person_emp_length: float
-    loan_intent: str
-    loan_grade: str
-    loan_amnt: float
-    loan_int_rate: float
-    loan_percent_income: float
-    cb_person_default_on_file: str
-    cb_person_cred_hist_length: int
-
-
-@app.post('/predict')
+@app.post("/predict")
 def predict(data: LoanApplication):
-    input_dict = data.dict()
-    input_df = pd.DataFrame([input_dict])
+    started = time.perf_counter()
+    features = data.to_features()
+    input_df = pd.DataFrame([features])
 
-    probability = float(ml_model['model'].predict_proba(input_df)[:, 1][0])
-    threshold = float(ml_model["threshold"])
-    prediction = int(probability >= threshold)
+    margin = float(model.margin(input_df)[0])
+    probability = float(model.calibrate(margin))
+    band = model.risk_band(probability)
 
-    # 3-tier risk band for realistic underwriting decisioning
-    if probability >= threshold:
-        result_band = "High Risk"
-    elif probability >= 0.25:
-        result_band = "Medium Risk"
-    else:
-        result_band = "Low Risk"
-
-    # Compute SHAP explanation
-    preprocessor = ml_model['preprocessor']
-    explainer = ml_model['explainer']
-    feature_names = ml_model['feature_names']
-
-    transformed = preprocessor.transform(input_df)
-    transformed_df = pd.DataFrame(transformed, columns=feature_names)
-    raw_shap_values = explainer.shap_values(transformed_df)
-    shap_vals = raw_shap_values[0] if hasattr(raw_shap_values, 'ndim') and raw_shap_values.ndim == 2 else raw_shap_values
-
+    shap_by_feature = model.explain(input_df)
     factors = []
-    for feat_name, feat_val, s_val in zip(feature_names, transformed[0], shap_vals):
-        # Skip inactive one-hot encoded categories
-        if feat_name.startswith('cat__') and feat_val == 0.0:
-            continue
-
-        label, display_val = format_feature(feat_name, input_dict)
-        s_float = float(s_val)
+    for col, s_val in shap_by_feature.items():
+        label, display_val = format_feature(col, features)
         factors.append({
             "feature": label,
-            "raw_feature": feat_name,
+            "raw_feature": col,
             "value": display_val,
-            "shap_value": round(s_float, 4),
-            "abs_impact": round(abs(s_float), 4),
-            "direction": "increase" if s_float > 0 else "decrease",
-            "effect": "Increases Risk" if s_float > 0 else "Reduces Risk"
+            "shap_value": round(s_val, 4),
+            "abs_impact": round(abs(s_val), 4),
+            "direction": "increase" if s_val > 0 else "decrease",
+            "effect": "Increases Risk" if s_val > 0 else "Reduces Risk",
         })
+    factors.sort(key=lambda x: x["abs_impact"], reverse=True)
 
-    # Sort factors by impact magnitude
-    factors.sort(key=lambda x: x['abs_impact'], reverse=True)
+    risk_increasing = [f for f in factors if f["direction"] == "increase"]
+    risk_decreasing = [f for f in factors if f["direction"] == "decrease"]
 
-    risk_increasing = [f for f in factors if f['direction'] == 'increase']
-    risk_decreasing = [f for f in factors if f['direction'] == 'decrease']
+    logger.info(json.dumps({
+        "event": "prediction",
+        "model_version": model.meta.get("model_version"),
+        "probability": round(probability, 4),
+        "risk_band": band,
+        "latency_ms": round((time.perf_counter() - started) * 1000, 1),
+    }))
 
     return {
         "default_probability": probability,
-        "default_prediction": prediction,
-        "threshold": threshold,
-        "medium_threshold": 0.25,
-        "Result": result_band,
+        "default_prediction": int(probability >= model.threshold),
+        "threshold": model.threshold,
+        "medium_threshold": model.medium_threshold,
+        "Result": band,
+        "model_version": model.meta.get("model_version"),
+        "loan_percent_income": features["loan_percent_income"],
         "shap_analysis": {
-            "base_value": ml_model.get('base_value', 0.0),
+            "base_value": model.base_value,
+            "model_log_odds": margin,
             "factors": factors,
             "risk_increasing_count": len(risk_increasing),
             "risk_decreasing_count": len(risk_decreasing),
             "top_risk_increasing": risk_increasing[:3],
-            "top_risk_decreasing": risk_decreasing[:3]
-        }
+            "top_risk_decreasing": risk_decreasing[:3],
+        },
     }
 
 
-app.mount("/", StaticFiles(directory="static", html=True), name="static")
+app.mount("/", StaticFiles(directory=BASE_DIR / "static", html=True), name="static")

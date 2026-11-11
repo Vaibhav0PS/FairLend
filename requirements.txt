@@ -1,8 +1,13 @@
-fastapi==0.115.0
-uvicorn[standard]==0.30.6
-pydantic==2.9.2
-pandas==2.2.2
-scikit-learn==1.6.1
-xgboost==3.4.1
-joblib==1.4.2
-shap>=0.45.0
+# Serving and training. Versions must match the ones recorded in
+# artifacts/model_meta.json, because the preprocessor is a scikit-learn pickle.
+fastapi==0.162.4
+uvicorn[standard]==0.54.0
+pydantic==2.14.3
+numpy==2.4.6
+pandas==3.1.1
+scikit-learn==1.9.1
+scipy==1.17.1
+joblib==1.6.0
+# On Linux, the CPU-only build avoids pulling in ~200 MB of CUDA/NCCL libraries.
+xgboost==3.2.0; sys_platform != "linux"
+xgboost-cpu==3.2.0; sys_platform == "linux"

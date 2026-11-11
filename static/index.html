@@ -48,7 +48,7 @@
         <label for="person_income">Annual income</label>
         <div class="field">
           <span class="unit unit--prefix">$</span>
-          <input type="number" id="person_income" name="person_income" min="1000" step="1000" value="60000" required />
+          <input type="number" id="person_income" name="person_income" min="1000" max="10000000" step="any" value="60000" required />
         </div>
       </div>
 
@@ -67,7 +67,7 @@
       <div class="row">
         <label for="person_emp_length">Employment length</label>
         <div class="field">
-          <input type="number" id="person_emp_length" name="person_emp_length" min="0" max="60" step="0.5" value="5" required />
+          <input type="number" id="person_emp_length" name="person_emp_length" min="0" max="60" step="any" value="5" required />
           <span class="unit">years</span>
         </div>
       </div>
@@ -109,14 +109,14 @@
         <label for="loan_amnt">Loan amount</label>
         <div class="field">
           <span class="unit unit--prefix">$</span>
-          <input type="number" id="loan_amnt" name="loan_amnt" min="500" step="500" value="10000" required />
+          <input type="number" id="loan_amnt" name="loan_amnt" min="500" max="1000000" step="any" value="10000" required />
         </div>
       </div>
 
       <div class="row">
         <label for="loan_int_rate">Interest rate</label>
         <div class="field">
-          <input type="number" id="loan_int_rate" name="loan_int_rate" min="1" max="40" step="0.01" value="7.5" required />
+          <input type="number" id="loan_int_rate" name="loan_int_rate" min="0.01" max="40" step="0.01" value="7.5" required />
           <span class="unit">%</span>
         </div>
       </div>
@@ -124,11 +124,11 @@
       <div class="row">
         <label for="loan_percent_income">Loan-to-income ratio</label>
         <div class="field">
-          <input type="number" id="loan_percent_income" name="loan_percent_income" min="0" max="1" step="0.01" value="0.17" required />
+          <input type="number" id="loan_percent_income" name="loan_percent_income" value="0.17" readonly tabindex="-1" />
           <span class="unit">ratio</span>
         </div>
       </div>
-      <p class="hint" id="percentHint">Auto-calculated: loan amount ÷ annual income ($10,000 ÷ $60,000 = 0.17).</p>
+      <p class="hint" id="percentHint">Auto-calculated: loan amount ÷ annual income ($10,000 ÷ $60,000 = 0.17). The server recomputes this value.</p>
     </fieldset>
 
     <fieldset class="ledger__section">
@@ -192,7 +192,7 @@
           </div>
           <div>
             <dt>Decision threshold</dt>
-            <dd id="factThreshold">69.5%</dd>
+            <dd id="factThreshold">—</dd>
           </div>
           <div>
             <dt>Risk tier</dt>
@@ -229,7 +229,7 @@
       </div>
 
       <div class="shap-notes">
-        <p>&bull; <strong>Technical Calibration Note:</strong> SHAP values explain drivers of the underlying model in log-odds space. The final default probability is produced via probability calibration (CalibratedClassifierCV).</p>
+        <p>&bull; <strong>Technical Calibration Note:</strong> SHAP values explain the same XGBoost model that scores the application, in log-odds units. Each categorical factor sums all of its one-hot columns, so the base value plus all factors equals the model's log-odds. The displayed probability applies Platt (sigmoid) calibration to those log-odds.</p>
         <p>&bull; <strong>Fair Lending / ECOA Note:</strong> Age is a model input and would need compliance review before real-world use; under federal fair lending rules, it should not be cited as an adverse-action reason.</p>
       </div>
     </div>
