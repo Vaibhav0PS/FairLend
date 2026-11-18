@@ -27,6 +27,9 @@ from constructs import Construct
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PROJECT = "credit-risk"
 GITHUB_REPO = "Vaibhav0PS/FairLend"
+# GitHub's OIDC subject includes the owner and repository IDs (seen in CloudTrail).
+# Matching the IDs means a deleted-and-recreated repo with the same name can't deploy.
+GITHUB_SUBJECT_REPO = "Vaibhav0PS@184383907/FairLend@1403473338"
 MLFLOW_APP_NAME = f"{PROJECT}-mlflow"
 REGISTERED_MODEL = f"{PROJECT}-xgboost"
 
@@ -159,7 +162,7 @@ class CreditRiskMlopsStack(Stack):
                 conditions={
                     "StringEquals": {
                         "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
-                        "token.actions.githubusercontent.com:sub": f"repo:{GITHUB_REPO}:ref:refs/heads/main",
+                        "token.actions.githubusercontent.com:sub": f"repo:{GITHUB_SUBJECT_REPO}:ref:refs/heads/main",
                     }
                 },
             ),
