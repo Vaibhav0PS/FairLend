@@ -45,6 +45,9 @@ def main() -> None:
 
     client.set_registered_model_alias(name, ALIAS, mv.version)
     print(f"MLflow alias '{ALIAS}' -> v{mv.version}")
+    if "challenger" in (mv.aliases or []):
+        client.delete_registered_model_alias(name, "challenger")
+        print("Removed alias 'challenger' (it is the champion now)")
 
     package_arn = mv.tags.get("sagemaker.model_package_arn")
     if package_arn:

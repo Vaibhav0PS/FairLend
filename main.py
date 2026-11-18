@@ -150,6 +150,8 @@ def predict(data: LoanApplication):
         "registered_version": REGISTRY.get("version"),
         "probability": round(probability, 4),
         "risk_band": band,
+        # Model inputs, read back by the daily drift check (monitoring/drift_check.py).
+        "features": features,
         "latency_ms": round((time.perf_counter() - started) * 1000, 1),
     }))
 

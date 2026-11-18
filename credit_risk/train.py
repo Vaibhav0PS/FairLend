@@ -57,6 +57,23 @@ from . import tracking
 from .config import CATEGORICAL_COLS, NUMERIC_COLS
 from .data import clean, file_sha256, load_raw, split_xy
 from .model import CreditRiskModel, logit, sigmoid
+from .monitoring import build_reference_profile
+
+REFERENCE_PROFILE_FILE = "reference_profile.json"
+
+
+def s3_version_id(uri: str) -> str:
+    """S3 version ID of the training data, for lineage (best effort)."""
+    if not uri.startswith("s3://"):
+        return ""
+    try:
+        import boto3
+
+        bucket, key = uri[len("s3://"):].split("/", 1)
+        return boto3.client("s3").head_object(Bucket=bucket, Key=key).get("VersionId", "")
+    except Exception as err:  # lineage is nice to have, never a reason to fail training
+        print(f"Could not read S3 version of {uri}: {err}")
+        return ""
 
 
 def make_preprocessor(scale_numeric: bool) -> ColumnTransformer:
@@ -228,7 +245,8 @@ def main() -> None:
             "image_uri": os.environ.get("IMAGE_URI", ""),
             "job_name": os.environ.get("JOB_NAME", os.environ.get("TRAINING_JOB_NAME", "")),
             "data_s3_uri": os.environ.get("DATA_S3_URI", ""),
-            "data_s3_version_id": os.environ.get("DATA_S3_VERSION_ID", ""),
+            "data_s3_version_id": os.environ.get("DATA_S3_VERSION_ID") or s3_version_id(os.environ.get("DATA_S3_URI", "")),
+            "pipeline_execution": os.environ.get("PIPELINE_EXECUTION_ARN", ""),
         },
         "training": {
             "seed": args.seed,
@@ -253,6 +271,9 @@ def main() -> None:
     }
     model.save(args.out)
     Path(args.out, "metrics.json").write_text(json.dumps(metrics, indent=2, default=float))
+    profile = build_reference_profile(model, X_train)
+    profile["model_version"] = model.meta["model_version"]
+    Path(args.out, REFERENCE_PROFILE_FILE).write_text(json.dumps(profile, indent=2))
 
     if tracking.enabled():
         from . import plots
@@ -270,8 +291,11 @@ def main() -> None:
             input_example=X_test.head(3),
         )
         Path(args.out, "mlflow_run.json").write_text(json.dumps(run_info, indent=2))
-        print(f"MLflow run {run_info['run_id']} registered as "
-              f"{run_info['registered_model']} v{run_info['registered_version']}")
+        if run_info["registered_model"]:
+            print(f"MLflow run {run_info['run_id']} registered as "
+                  f"{run_info['registered_model']} v{run_info['registered_version']}")
+        else:
+            print(f"MLflow run {run_info['run_id']} logged (not registered)")
 
     t = test_metrics
     print(

@@ -20,6 +20,11 @@ breakdown of the factors behind it.
 | `scripts/fetch_model.py` | Downloads a registered version's model files |
 | `scripts/deploy_serving.py` | Deploys the champion model to Lambda and smoke-tests the live URL |
 | `.github/workflows/` | CI (tests, CDK synth) and the Lambda deploy |
+| `credit_risk/monitoring.py` | Reference profile of the training data, PSI |
+| `credit_risk/evaluate.py`, `credit_risk/register.py` | Pipeline steps: compare with champion, register for approval |
+| `monitoring/drift_check.py` | Daily drift-check Lambda |
+| `infra/retraining.py`, `infra/monitoring.py` | CDK: retraining pipeline; drift check, alarms, dashboard |
+| `scripts/simulate_traffic.py`, `scripts/start_retraining.py`, `scripts/subscribe_alerts.py` | Demo and setup helpers |
 | `Dockerfile.train` | Training image (same pinned libraries as the serving image) |
 | `main.py` | FastAPI app (`/health`, `/predict`, static frontend) |
 | `static/` | Web form |
@@ -174,6 +179,60 @@ warm requests take about 150 ms.
 The deploy job logs in to AWS through OIDC as the role `credit-risk-github-deploy`.
 Only the `main` branch of `Vaibhav0PS/FairLend` can assume it. The role can
 assume the CDK deploy roles and read the model from MLflow, nothing else.
+
+## Monitoring and retraining
+
+```mermaid
+flowchart LR
+    API[Lambda API] -->|inputs + probability, one JSON line per request| LOGS[CloudWatch Logs]
+    LOGS --> DRIFT[Drift-check Lambda<br/>daily, PSI per feature]
+    DRIFT -->|metrics| CW[CloudWatch dashboard credit-risk]
+    DRIFT -->|report + predictions| S3[(S3 monitoring/)]
+    CW -->|MaxFeaturePSI > 0.25| ALARM[Alarm credit-risk-drift]
+    ALARM -->|email| SNS[SNS credit-risk-alerts]
+    ALARM -->|EventBridge| PIPE
+    subgraph PIPE[SageMaker Pipeline credit-risk-retraining]
+        T[Train] --> E[Evaluate vs champion] --> C{better?}
+        C -->|yes| R[Register as challenger<br/>PendingManualApproval]
+    end
+    R -->|approval email| SNS
+    C -->|no| N[“not better” email]
+    R -.->|you: promote_model.py + Deploy API| API
+```
+
+**Drift check.** Each training run saves `reference_profile.json`: decile bins
+(numeric inputs) or category shares (categorical inputs) of the training data, and
+of the predicted probability. The `credit-risk-drift-check` Lambda runs daily, bins
+the last 24 hours of API requests the same way, and computes the population
+stability index (PSI) per input. Below 0.1 is stable, above 0.25 is a major shift.
+It needs at least 50 requests. The profile is packaged with the Lambda at deploy
+time, so it always matches the model being served.
+
+**Retraining with approval.** The drift alarm starts the pipeline. It trains a
+new model, scores it and the champion on the same test rows, and registers the
+new one only if its PR-AUC is higher. A registered model gets the MLflow alias
+`challenger` and the SageMaker approval status `PendingManualApproval`, and you get
+an email with both models' metrics. Nothing is deployed until you approve:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\promote_model.py --version <N> --profile dev-aws
+# then GitHub -> Actions -> Deploy API -> Run workflow
+```
+
+Note: the pipeline retrains on the dataset in S3. The live API never learns whether
+an applicant defaulted, so a real system would add newly labelled loans to that
+dataset before retraining. Until then, retraining on unchanged data produces the
+same model, which the pipeline correctly declines to register.
+
+**Demo commands**
+
+```powershell
+python scripts/subscribe_alerts.py --email you@example.com --profile dev-aws   # once
+python scripts/simulate_traffic.py --n 120 --check --profile dev-aws           # normal traffic
+python scripts/simulate_traffic.py --n 250 --drift --check --profile dev-aws   # drift -> alarm -> pipeline
+python scripts/start_retraining.py --profile dev-aws                           # start the pipeline by hand
+python scripts/start_retraining.py --profile dev-aws --min-gain -1             # force the approval path
+```
 
 ## API
 

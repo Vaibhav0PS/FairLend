@@ -7,7 +7,7 @@ current AWS credentials.
 Environment variables:
     MLFLOW_TRACKING_URI       MLflow App ARN (or any MLflow server URI)
     MLFLOW_EXPERIMENT_NAME    default "credit-risk"
-    MLFLOW_REGISTERED_MODEL   default "credit-risk-xgboost"; set to "" to skip registration
+    MLFLOW_REGISTERED_MODEL   default "credit-risk-xgboost"; "none" (or "") skips registration
 """
 
 from __future__ import annotations
@@ -50,7 +50,9 @@ def log_run(
 
     meta = model.meta
     mlflow.set_experiment(os.environ.get("MLFLOW_EXPERIMENT_NAME", "credit-risk"))
-    registered_name = os.environ.get("MLFLOW_REGISTERED_MODEL", "credit-risk-xgboost") or None
+    registered_name = os.environ.get("MLFLOW_REGISTERED_MODEL", "credit-risk-xgboost")
+    if registered_name.strip().lower() in ("", "none"):
+        registered_name = None  # log the run only; the pipeline's register step decides
 
     with mlflow.start_run(run_name=f"train-{meta['model_version']}") as run:
         mlflow.set_tags({

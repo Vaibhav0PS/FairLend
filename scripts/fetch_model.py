@@ -22,7 +22,8 @@ import boto3
 
 from _aws import stack_outputs
 
-REQUIRED = ("preprocessor.joblib", "xgb_model.json", "model_meta.json")
+# reference_profile.json is packaged with the drift-check Lambda.
+REQUIRED = ("preprocessor.joblib", "xgb_model.json", "model_meta.json", "reference_profile.json")
 
 
 def main() -> None:

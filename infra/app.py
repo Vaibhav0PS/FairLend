@@ -2,8 +2,10 @@
 """AWS infrastructure for the credit risk MLOps project (AWS CDK, Python).
 
 Stacks:
-    CreditRiskMlops    S3, ECR, IAM roles, MLflow App, GitHub OIDC deploy role
-    CreditRiskServing  the API on Lambda with a Function URL
+    CreditRiskMlops    S3, ECR, IAM roles, MLflow App, GitHub OIDC deploy role,
+                       alerts topic, retraining pipeline (retraining.py)
+    CreditRiskServing  the API on Lambda with a Function URL, drift check,
+                       alarms and dashboard (monitoring.py)
 
 Deploy:   cdk deploy --all     (from this folder, with the project venv active)
           cdk deploy CreditRiskServing -c model_src=build/model   (serve a fetched model)
@@ -22,7 +24,11 @@ from aws_cdk import aws_lambda as lambda_
 from aws_cdk import aws_logs as logs
 from aws_cdk import aws_s3 as s3
 from aws_cdk import aws_sagemaker as sagemaker
+from aws_cdk import aws_sns as sns
 from constructs import Construct
+
+from monitoring import ApiMonitoring
+from retraining import PIPELINE_NAME, RetrainingPipeline
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PROJECT = "credit-risk"
@@ -32,6 +38,13 @@ GITHUB_REPO = "Vaibhav0PS/FairLend"
 GITHUB_SUBJECT_REPO = "Vaibhav0PS@184383907/FairLend@1403473338"
 MLFLOW_APP_NAME = f"{PROJECT}-mlflow"
 REGISTERED_MODEL = f"{PROJECT}-xgboost"
+# Fixed names so the two stacks can refer to each other without CloudFormation exports.
+ALERTS_TOPIC_NAME = f"{PROJECT}-alerts"
+DRIFT_ALARM_NAME = f"{PROJECT}-drift"
+
+
+def mlops_bucket_name(stack: Stack) -> str:
+    return f"{PROJECT}-mlops-{stack.account}-{stack.region}"
 
 
 class CreditRiskMlopsStack(Stack):
@@ -43,7 +56,7 @@ class CreditRiskMlopsStack(Stack):
         bucket = s3.Bucket(
             self,
             "MlopsBucket",
-            bucket_name=f"{PROJECT}-mlops-{self.account}-{self.region}",
+            bucket_name=mlops_bucket_name(self),
             versioned=True,
             encryption=s3.BucketEncryption.S3_MANAGED,
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
@@ -189,13 +202,45 @@ class CreditRiskMlopsStack(Stack):
         ))
         bucket.grant_read(github_role, "mlflow-artifacts/*")
 
-        # ---------- Outputs used by scripts/launch_training.py ----------
+        # ---------- Alerts: drift, API errors, approval requests ----------
+        # The email subscription is added with scripts/subscribe_alerts.py, not here,
+        # so the address stays out of this public repository.
+        topic = sns.Topic(self, "Alerts", topic_name=ALERTS_TOPIC_NAME, display_name="Credit risk MLOps")
+        topic.add_to_resource_policy(iam.PolicyStatement(
+            sid="CloudWatchAlarms",
+            principals=[iam.ServicePrincipal("cloudwatch.amazonaws.com")],
+            actions=["sns:Publish"],
+            resources=[topic.topic_arn],
+            conditions={"StringEquals": {"aws:SourceAccount": self.account}},
+        ))
+        topic.grant_publish(job_role)  # evaluate / register steps send result emails
+        job_role.add_to_policy(iam.PolicyStatement(
+            sid="SetApprovalStatus",
+            actions=["sagemaker:UpdateModelPackage", "sagemaker:DescribeModelPackage"],
+            resources=[self.format_arn(service="sagemaker", resource="model-package", resource_name="*")],
+        ))
+
+        retraining = RetrainingPipeline(
+            self,
+            "Retraining",
+            project_root=PROJECT_ROOT,
+            bucket=bucket,
+            job_role=job_role,
+            topic=topic,
+            mlflow_app_arn=mlflow_app.attr_arn,
+            model_name=REGISTERED_MODEL,
+            drift_alarm_name=DRIFT_ALARM_NAME,
+        )
+
+        # ---------- Outputs used by the scripts/ folder ----------
         CfnOutput(self, "BucketName", value=bucket.bucket_name)
         CfnOutput(self, "TrainRepoUri", value=train_repo.repository_uri)
         CfnOutput(self, "SageMakerJobRoleArn", value=job_role.role_arn)
         CfnOutput(self, "MlflowAppArn", value=mlflow_app.attr_arn)
         CfnOutput(self, "RegisteredModelName", value=REGISTERED_MODEL)
         CfnOutput(self, "GitHubDeployRoleArn", value=github_role.role_arn)
+        CfnOutput(self, "AlertsTopicArn", value=topic.topic_arn)
+        CfnOutput(self, "RetrainingPipelineName", value=PIPELINE_NAME)
 
 
 class CreditRiskServingStack(Stack):
@@ -226,6 +271,7 @@ class CreditRiskServingStack(Stack):
                 file="Dockerfile",
                 build_args={"MODEL_SRC": model_src},
                 platform=ecr_assets.Platform.LINUX_AMD64,
+                exclude=["build/drift_lambda"],
             ),
             architecture=lambda_.Architecture.X86_64,
             memory_size=2048,  # more memory also means more CPU, so faster cold starts
@@ -236,8 +282,24 @@ class CreditRiskServingStack(Stack):
         )
 
         url = fn.add_function_url(auth_type=lambda_.FunctionUrlAuthType.NONE)
+
+        monitoring = ApiMonitoring(
+            self,
+            "Monitoring",
+            project_root=PROJECT_ROOT,
+            model_dir=PROJECT_ROOT / model_src,
+            api_function=fn,
+            api_log_group=log_group,
+            bucket=s3.Bucket.from_bucket_name(self, "MlopsBucket", mlops_bucket_name(self)),
+            topic=sns.Topic.from_topic_arn(
+                self, "Alerts", self.format_arn(service="sns", resource=ALERTS_TOPIC_NAME)),
+            drift_alarm_name=DRIFT_ALARM_NAME,
+        )
+
         CfnOutput(self, "ApiUrl", value=url.url)
         CfnOutput(self, "FunctionName", value=fn.function_name)
+        CfnOutput(self, "DriftCheckFunctionName", value=monitoring.drift_function.function_name)
+        CfnOutput(self, "DashboardUrl", value=monitoring.dashboard_url)
 
 
 app = cdk.App()
