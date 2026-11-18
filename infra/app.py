@@ -1,21 +1,32 @@
 #!/usr/bin/env python3
 """AWS infrastructure for the credit risk MLOps project (AWS CDK, Python).
 
-Deploy:   cdk deploy     (from this folder, with the project venv active)
-Teardown: cdk destroy    (deletes the bucket contents, images and MLflow data too)
+Stacks:
+    CreditRiskMlops    S3, ECR, IAM roles, MLflow App, GitHub OIDC deploy role
+    CreditRiskServing  the API on Lambda with a Function URL
+
+Deploy:   cdk deploy --all     (from this folder, with the project venv active)
+          cdk deploy CreditRiskServing -c model_src=build/model   (serve a fetched model)
+Teardown: cdk destroy --all    (deletes the bucket contents, images and MLflow data too)
 """
 
 import os
+from pathlib import Path
 
 import aws_cdk as cdk
 from aws_cdk import CfnOutput, Duration, RemovalPolicy, Stack
 from aws_cdk import aws_ecr as ecr
+from aws_cdk import aws_ecr_assets as ecr_assets
 from aws_cdk import aws_iam as iam
+from aws_cdk import aws_lambda as lambda_
+from aws_cdk import aws_logs as logs
 from aws_cdk import aws_s3 as s3
 from aws_cdk import aws_sagemaker as sagemaker
 from constructs import Construct
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PROJECT = "credit-risk"
+GITHUB_REPO = "Vaibhav0PS/FairLend"
 MLFLOW_APP_NAME = f"{PROJECT}-mlflow"
 REGISTERED_MODEL = f"{PROJECT}-xgboost"
 
@@ -130,23 +141,119 @@ class CreditRiskMlopsStack(Stack):
             resources=[mlflow_app_arn],
         ))
 
+        # ---------- GitHub Actions: keyless deploys through OIDC ----------
+        github_oidc = iam.OidcProviderNative(
+            self,
+            "GitHubOidc",
+            url="https://token.actions.githubusercontent.com",
+            client_ids=["sts.amazonaws.com"],
+        )
+        github_role = iam.Role(
+            self,
+            "GitHubDeployRole",
+            role_name=f"{PROJECT}-github-deploy",
+            description=f"Assumed by GitHub Actions in {GITHUB_REPO} (main branch only)",
+            max_session_duration=Duration.hours(1),
+            assumed_by=iam.WebIdentityPrincipal(
+                github_oidc.oidc_provider_arn,
+                conditions={
+                    "StringEquals": {
+                        "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+                        "token.actions.githubusercontent.com:sub": f"repo:{GITHUB_REPO}:ref:refs/heads/main",
+                    }
+                },
+            ),
+        )
+        # cdk deploy works by assuming the bootstrap roles; the GitHub role needs nothing else to deploy.
+        github_role.add_to_policy(iam.PolicyStatement(
+            sid="AssumeCdkBootstrapRoles",
+            actions=["sts:AssumeRole"],
+            resources=[f"arn:aws:iam::{self.account}:role/cdk-hnb659fds-*-{self.account}-{self.region}"],
+        ))
+        github_role.add_to_policy(iam.PolicyStatement(
+            sid="ReadStackOutputs",
+            actions=["cloudformation:DescribeStacks"],
+            resources=[
+                self.format_arn(service="cloudformation", resource="stack", resource_name=f"{name}/*")
+                for name in ("CreditRiskMlops", "CreditRiskServing")
+            ],
+        ))
+        # Download the champion model from MLflow.
+        github_role.add_to_policy(iam.PolicyStatement(
+            sid="ReadMlflow",
+            actions=["sagemaker:CallMlflowAppApi", "sagemaker-mlflow:*", "sagemaker:DescribeMlflowApp"],
+            resources=[mlflow_app_arn],
+        ))
+        bucket.grant_read(github_role, "mlflow-artifacts/*")
+
         # ---------- Outputs used by scripts/launch_training.py ----------
         CfnOutput(self, "BucketName", value=bucket.bucket_name)
         CfnOutput(self, "TrainRepoUri", value=train_repo.repository_uri)
         CfnOutput(self, "SageMakerJobRoleArn", value=job_role.role_arn)
         CfnOutput(self, "MlflowAppArn", value=mlflow_app.attr_arn)
         CfnOutput(self, "RegisteredModelName", value=REGISTERED_MODEL)
+        CfnOutput(self, "GitHubDeployRoleArn", value=github_role.role_arn)
+
+
+class CreditRiskServingStack(Stack):
+    """The API and web form on Lambda, behind a public Function URL.
+
+    The image is built from the project Dockerfile with the model folder given by
+    the `model_src` context value (default: the committed `artifacts/`).
+    """
+
+    def __init__(self, scope: Construct, construct_id: str, *, model_src: str, **kwargs) -> None:
+        super().__init__(scope, construct_id, **kwargs)
+
+        log_group = logs.LogGroup(
+            self,
+            "ApiLogs",
+            log_group_name=f"/aws/lambda/{PROJECT}-api",
+            retention=logs.RetentionDays.TWO_WEEKS,
+            removal_policy=RemovalPolicy.DESTROY,
+        )
+
+        fn = lambda_.DockerImageFunction(
+            self,
+            "ApiFunction",
+            function_name=f"{PROJECT}-api",
+            description="Credit Ledger API (FastAPI + XGBoost + SHAP)",
+            code=lambda_.DockerImageCode.from_image_asset(
+                str(PROJECT_ROOT),
+                file="Dockerfile",
+                build_args={"MODEL_SRC": model_src},
+                platform=ecr_assets.Platform.LINUX_AMD64,
+            ),
+            architecture=lambda_.Architecture.X86_64,
+            memory_size=2048,  # more memory also means more CPU, so faster cold starts
+            timeout=Duration.seconds(30),
+            # Caps cost if the public URL gets hammered: at most 5 requests at once.
+            reserved_concurrent_executions=5,
+            log_group=log_group,
+        )
+
+        url = fn.add_function_url(auth_type=lambda_.FunctionUrlAuthType.NONE)
+        CfnOutput(self, "ApiUrl", value=url.url)
+        CfnOutput(self, "FunctionName", value=fn.function_name)
 
 
 app = cdk.App()
+env = cdk.Environment(
+    account=os.environ.get("CDK_DEFAULT_ACCOUNT"),
+    region=os.environ.get("CDK_DEFAULT_REGION", "ap-south-1"),
+)
 CreditRiskMlopsStack(
     app,
     "CreditRiskMlops",
-    env=cdk.Environment(
-        account=os.environ.get("CDK_DEFAULT_ACCOUNT"),
-        region=os.environ.get("CDK_DEFAULT_REGION", "ap-south-1"),
-    ),
+    env=env,
     description="Credit risk MLOps: S3, ECR, IAM roles and SageMaker serverless MLflow",
+)
+CreditRiskServingStack(
+    app,
+    "CreditRiskServing",
+    model_src=app.node.try_get_context("model_src") or "artifacts",
+    env=env,
+    description="Credit risk API on Lambda with a Function URL",
 )
 cdk.Tags.of(app).add("project", PROJECT)
 app.synth()

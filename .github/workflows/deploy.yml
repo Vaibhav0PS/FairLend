@@ -1,0 +1,68 @@
+name: Deploy API
+
+# Runs the tests, then deploys the API to Lambda with the model that has the
+# "champion" alias in the MLflow registry. Run it by hand after promoting a new
+# model with scripts/promote_model.py, or let it run on every push to main.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      model_version:
+        description: "Registered model version to serve (empty = champion alias)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-api
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-south-1
+  # Created by the CreditRiskMlops stack (output GitHubDeployRoleArn). Not a secret.
+  AWS_DEPLOY_ROLE_ARN: arn:aws:iam::707408838833:role/credit-risk-github-deploy
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    needs: ci
+    runs-on: ubuntu-latest
+    # No `environment:` here: it would change the OIDC subject claim and break
+    # the role's trust condition (repo:...:ref:refs/heads/main).
+    permissions:
+      contents: read
+      id-token: write   # lets the job get an OIDC token for AWS; no access keys are stored
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install deploy tools
+        run: >
+          pip install boto3==1.44.0 mlflow-skinny==3.16.0 sagemaker-mlflow==0.5.0
+          aws-cdk-lib==2.276.0 constructs==10.8.1
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Deploy and smoke-test
+        env:
+          MODEL_VERSION: ${{ inputs.model_version }}
+          MLFLOW_DISABLE_AGENT_HINT: "1"
+        run: |
+          if [ -n "$MODEL_VERSION" ]; then
+            python scripts/deploy_serving.py --version "$MODEL_VERSION"
+          else
+            python scripts/deploy_serving.py
+          fi

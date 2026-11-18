@@ -28,6 +28,10 @@ BASE_DIR = Path(__file__).resolve().parent
 MODEL_DIR = Path(os.environ.get("MODEL_DIR", BASE_DIR / "artifacts"))
 model = CreditRiskModel.load(MODEL_DIR)
 
+# Written by scripts/fetch_model.py when the model comes from the MLflow registry.
+_registry_file = MODEL_DIR / "registry.json"
+REGISTRY = json.loads(_registry_file.read_text()) if _registry_file.exists() else {}
+
 app = FastAPI(title="Credit Ledger", version=model.meta.get("model_version", "unknown"))
 
 
@@ -105,6 +109,8 @@ def health():
         "model_loaded": True,
         "explainer_loaded": True,
         "model_version": model.meta.get("model_version"),
+        "registered_model": REGISTRY.get("name"),
+        "registered_version": REGISTRY.get("version"),
         "threshold": model.threshold,
         "medium_threshold": model.medium_threshold,
     }
@@ -141,6 +147,7 @@ def predict(data: LoanApplication):
     logger.info(json.dumps({
         "event": "prediction",
         "model_version": model.meta.get("model_version"),
+        "registered_version": REGISTRY.get("version"),
         "probability": round(probability, 4),
         "risk_band": band,
         "latency_ms": round((time.perf_counter() - started) * 1000, 1),

@@ -7,3 +7,4 @@ __pycache__/
 infra/cdk.out/
 artifacts/mlflow_run.json
 infra/cdk-outputs.json
+build/

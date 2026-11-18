@@ -16,6 +16,10 @@ breakdown of the factors behind it.
 | `credit_risk/plots.py` | Calibration, precision-recall and SHAP importance plots logged to MLflow |
 | `infra/app.py` | AWS CDK stack: S3 bucket, ECR repo, IAM roles, SageMaker serverless MLflow App |
 | `scripts/launch_training.py` | Uploads data, builds and pushes the training image, runs the SageMaker job |
+| `scripts/promote_model.py` | Marks a registered version as `champion` (MLflow alias + SageMaker approval) |
+| `scripts/fetch_model.py` | Downloads a registered version's model files |
+| `scripts/deploy_serving.py` | Deploys the champion model to Lambda and smoke-tests the live URL |
+| `.github/workflows/` | CI (tests, CDK synth) and the Lambda deploy |
 | `Dockerfile.train` | Training image (same pinned libraries as the serving image) |
 | `main.py` | FastAPI app (`/health`, `/predict`, static frontend) |
 | `static/` | Web form |
@@ -124,8 +128,52 @@ Applications → MLflow → credit-risk-mlflow**.
 Remove everything (bucket contents, images and MLflow data included):
 
 ```powershell
-cd infra; npx aws-cdk@2 destroy
+cd infra; npx aws-cdk@2 destroy --all
 ```
+
+## Serving on AWS Lambda
+
+```mermaid
+flowchart LR
+    MLF[MLflow registry<br/>alias champion] -->|fetch_model.py| BM[build/model]
+    BM --> IMG[Dockerfile + Lambda Web Adapter]
+    IMG -->|cdk deploy CreditRiskServing| L[Lambda credit-risk-api]
+    L --> URL[Public Function URL<br/>web form + /predict]
+    L --> CW[CloudWatch Logs<br/>one JSON line per prediction]
+    GH[GitHub Actions<br/>OIDC, no stored keys] -->|deploy_serving.py| IMG
+```
+
+The same `Dockerfile` runs locally and on Lambda. The Lambda Web Adapter
+forwards Lambda requests to uvicorn. The model files are baked into the image,
+so each deployed image always serves one known model version; `/health`
+reports which one.
+
+Promote a model, then deploy it:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\promote_model.py --version 1 --profile dev-aws
+.\.venv\Scripts\python.exe scripts\deploy_serving.py --profile dev-aws
+```
+
+`promote_model.py` sets the MLflow alias `champion` and approves the matching
+SageMaker Model Registry package. `deploy_serving.py` downloads the champion,
+runs `cdk deploy CreditRiskServing`, and smoke-tests `/health` and `/predict`
+on the live URL. It fails if Lambda doesn't serve the expected version.
+
+Lambda settings: 2048 MB memory, 30 s timeout, at most 5 concurrent requests
+(caps the cost of the public URL). A cold start takes about 20 seconds;
+warm requests take about 150 ms.
+
+### GitHub Actions
+
+| Workflow | Runs on | What it does |
+|---|---|---|
+| `ci.yml` | every push and pull request | runs the tests and `cdk synth` |
+| `deploy.yml` | push to `main`, or by hand | runs CI, then `deploy_serving.py`. When run by hand you can pick a model version |
+
+The deploy job logs in to AWS through OIDC as the role `credit-risk-github-deploy`.
+Only the `main` branch of `Vaibhav0PS/FairLend` can assume it. The role can
+assume the CDK deploy roles and read the model from MLflow, nothing else.
 
 ## API
 

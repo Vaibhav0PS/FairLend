@@ -38,6 +38,8 @@ from pathlib import Path
 import boto3
 from botocore.exceptions import ClientError
 
+from _aws import isolated_docker_env
+
 ROOT = Path(__file__).resolve().parents[1]
 STACK_NAME = "CreditRiskMlops"
 DATA_KEY = "data/raw/credit_risk_dataset.csv"
@@ -105,34 +107,6 @@ def build_and_push(session: boto3.Session, repo_uri: str, tag: str) -> str:
             input=password.encode(), stdout=subprocess.DEVNULL, env=env)
         run([env["DOCKER_EXE"], "push", image_uri], env=env)
     return image_uri
-
-
-@contextlib.contextmanager
-def isolated_docker_env():
-    """Environment for `docker login/push` that stores the ECR token in a temp file.
-
-    On Windows, the ECR token is too long for the Windows credential store
-    ("The stub received bad data"). A throwaway DOCKER_CONFIG keeps the token
-    out of the user's own Docker config. Docker picks the OS credential helper
-    automatically if it finds one on PATH, so on Windows the Docker bin folder
-    is left off PATH and docker.exe is called by its full path.
-    """
-    docker_exe = shutil.which("docker")
-    if not docker_exe:
-        raise SystemExit("docker not found on PATH")
-    host = subprocess.run(
-        [docker_exe, "context", "inspect", "--format", "{{.Endpoints.docker.Host}}"],
-        capture_output=True, text=True, check=True,
-    ).stdout.strip()
-    with tempfile.TemporaryDirectory() as docker_config:
-        Path(docker_config, "config.json").write_text("{}")
-        env = {**os.environ, "DOCKER_CONFIG": docker_config, "DOCKER_HOST": host, "DOCKER_EXE": docker_exe}
-        if sys.platform == "win32":
-            docker_dir = Path(docker_exe).parent.resolve()
-            env["PATH"] = os.pathsep.join(
-                p for p in os.environ.get("PATH", "").split(os.pathsep) if p and Path(p).resolve() != docker_dir
-            )
-        yield env
 
 
 def latest_image(session: boto3.Session, repo_uri: str) -> str:
